@@ -1,0 +1,7 @@
+*.txt
+learning_curve*
+notebook/
+.idea
+*.zip
+kfold_results*/
+*.pyc
