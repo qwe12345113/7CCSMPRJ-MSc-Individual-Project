@@ -2,6 +2,7 @@ from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as T
 import torchvision.transforms.functional as TF
 import os
+import random
 from pathlib import Path
 from PIL import Image
 import numpy as np
@@ -31,7 +32,6 @@ def read_samples_from_txt(txt_file):
 
         image_path = os.path.normpath(parts[0].strip())
         mask_path = os.path.normpath(parts[1].strip())
-        print("----------", image_path)
 
         if os.path.exists(image_path) and os.path.exists(mask_path):
             samples.append((image_path, mask_path))
@@ -105,23 +105,104 @@ def resize_and_pad_keep_ratio(image, mask, target_size, image_fill=0, mask_fill=
     return image, mask, meta
 
 
+class SegmentationAugmentation:
+    def __init__(
+        self,
+        aug_prob=0.5,
+        hflip_prob=0.5,
+        vflip_prob=0.0,
+        rotation_degree=10,
+        rotation_prob=0.5,
+        use_color_jitter=True,
+        color_jitter_prob=0.5,
+        brightness=0.2,
+        contrast=0.2,
+        saturation=0.2,
+        hue=0.02
+    ):
+        """
+        Args:
+            aug_prob: overall probability to apply augmentation to this sample
+            hflip_prob: probability of horizontal flip after entering augmentation
+            vflip_prob: probability of vertical flip after entering augmentation
+            rotation_degree: max absolute random rotation angle
+            rotation_prob: probability of applying rotation
+            use_color_jitter: whether to use color jitter
+            color_jitter_prob: probability of applying color jitter
+        """
+        self.aug_prob = aug_prob
+        self.hflip_prob = hflip_prob
+        self.vflip_prob = vflip_prob
+        self.rotation_degree = rotation_degree
+        self.rotation_prob = rotation_prob
+        self.use_color_jitter = use_color_jitter
+        self.color_jitter_prob = color_jitter_prob
+
+        if use_color_jitter:
+            self.color_jitter = T.ColorJitter(
+                brightness=brightness,
+                contrast=contrast,
+                saturation=saturation,
+                hue=hue
+            )
+        else:
+            self.color_jitter = None
+
+    def __call__(self, image, mask):
+        # Not every training sample will be augmented
+        if random.random() > self.aug_prob:
+            return image, mask
+
+        # Horizontal flip
+        if random.random() < self.hflip_prob:
+            image = TF.hflip(image)
+            mask = TF.hflip(mask)
+
+        # Vertical flip
+        if random.random() < self.vflip_prob:
+            image = TF.vflip(image)
+            mask = TF.vflip(mask)
+
+        # Rotation
+        if self.rotation_degree is not None and self.rotation_degree > 0:
+            if random.random() < self.rotation_prob:
+                angle = random.uniform(-self.rotation_degree, self.rotation_degree)
+                image = TF.rotate(image, angle, interpolation=Image.BILINEAR, fill=0)
+                mask = TF.rotate(mask, angle, interpolation=Image.NEAREST, fill=0)
+
+        # Color jitter only for image
+        if self.color_jitter is not None and random.random() < self.color_jitter_prob:
+            image = self.color_jitter(image)
+
+        return image, mask
+
+
 class SegmentationDataset(Dataset):
     def __init__(
         self,
         samples,
         target_size=(672, 928),
-        num_classes=1
+        num_classes=1,
+        augment=False,
+        augmentation=None,
+        normalize=None
     ):
         """
         Args:
             samples: list of (image_path, mask_path)
             target_size: (H, W)
             num_classes: 1 for binary segmentation, >1 for multi-class
+            augment: whether to use augmentation
+            augmentation: callable(image, mask) -> (image, mask)
+            normalize: None or torchvision.transforms.Normalize(...)
         """
         self.samples = samples
         self.target_size = target_size
         self.num_classes = num_classes
-        self.image_transform = T.ToTensor()
+        self.augment = augment
+        self.augmentation = augmentation
+        self.normalize = normalize
+        self.to_tensor = T.ToTensor()
 
         if len(self.samples) == 0:
             raise ValueError("No valid samples provided.")
@@ -143,7 +224,14 @@ class SegmentationDataset(Dataset):
             mask_fill=0
         )
 
-        image = self.image_transform(image).clone()
+        if self.augment and self.augmentation is not None:
+            image, mask = self.augmentation(image, mask)
+
+        image = self.to_tensor(image).clone()
+
+        if self.normalize is not None:
+            image = self.normalize(image)
+
         mask = torch.tensor(np.array(mask), dtype=torch.uint8)
 
         if self.num_classes == 1:
@@ -184,12 +272,44 @@ def get_segmentation_dataloader(
     num_classes=1,
     shuffle=True,
     num_workers=4,
-    pin_memory=True
+    pin_memory=True,
+    augment=False,
+    normalize=None,
+    aug_prob=0.5,
+    hflip_prob=0.5,
+    vflip_prob=0.0,
+    rotation_degree=10,
+    rotation_prob=0.5,
+    use_color_jitter=True,
+    color_jitter_prob=0.5,
+    brightness=0.2,
+    contrast=0.2,
+    saturation=0.2,
+    hue=0.02
 ):
+    augmentation = None
+    if augment:
+        augmentation = SegmentationAugmentation(
+            aug_prob=aug_prob,
+            hflip_prob=hflip_prob,
+            vflip_prob=vflip_prob,
+            rotation_degree=rotation_degree,
+            rotation_prob=rotation_prob,
+            use_color_jitter=use_color_jitter,
+            color_jitter_prob=color_jitter_prob,
+            brightness=brightness,
+            contrast=contrast,
+            saturation=saturation,
+            hue=hue
+        )
+
     dataset = SegmentationDataset(
         samples=samples,
         target_size=target_size,
-        num_classes=num_classes
+        num_classes=num_classes,
+        augment=augment,
+        augmentation=augmentation,
+        normalize=normalize
     )
 
     loader = DataLoader(
@@ -210,7 +330,20 @@ def get_segmentation_dataloader_from_txt(
     num_classes=1,
     shuffle=True,
     num_workers=4,
-    pin_memory=True
+    pin_memory=True,
+    augment=False,
+    normalize=None,
+    aug_prob=0.5,
+    hflip_prob=0.5,
+    vflip_prob=0.0,
+    rotation_degree=10,
+    rotation_prob=0.5,
+    use_color_jitter=True,
+    color_jitter_prob=0.5,
+    brightness=0.2,
+    contrast=0.2,
+    saturation=0.2,
+    hue=0.02
 ):
     samples = read_samples_from_txt(txt_file)
     return get_segmentation_dataloader(
@@ -220,6 +353,56 @@ def get_segmentation_dataloader_from_txt(
         num_classes=num_classes,
         shuffle=shuffle,
         num_workers=num_workers,
-        pin_memory=pin_memory
+        pin_memory=pin_memory,
+        augment=augment,
+        normalize=normalize,
+        aug_prob=aug_prob,
+        hflip_prob=hflip_prob,
+        vflip_prob=vflip_prob,
+        rotation_degree=rotation_degree,
+        rotation_prob=rotation_prob,
+        use_color_jitter=use_color_jitter,
+        color_jitter_prob=color_jitter_prob,
+        brightness=brightness,
+        contrast=contrast,
+        saturation=saturation,
+        hue=hue
     )
 
+
+if __name__ == "__main__":
+    txt_file = "../dataset/train.txt"
+
+    normalize = T.Normalize(
+        mean=[0.5, 0.5, 0.5],
+        std=[0.5, 0.5, 0.5]
+    )
+
+    loader = get_segmentation_dataloader_from_txt(
+        txt_file=txt_file,
+        batch_size=2,
+        target_size=(320, 320),
+        num_classes=1,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=False,
+        augment=True,
+        normalize=normalize,
+        aug_prob=0.5,
+        hflip_prob=0.5,
+        vflip_prob=0.0,
+        rotation_degree=10,
+        rotation_prob=0.5,
+        use_color_jitter=True,
+        color_jitter_prob=0.3
+    )
+
+    batch = next(iter(loader))
+
+    print("Image batch shape:", batch["image"].shape)     # [B, 3, H, W]
+    print("Mask batch shape:", batch["mask"].shape)       # [B, 1, H, W]
+    print("Original sizes:", batch["original_size"])
+    print("Resized sizes:", batch["resized_size"])
+    print("Target sizes:", batch["target_size"])
+    print("Padding:", batch["padding"])
+    print("Scale:", batch["scale"])
