@@ -175,6 +175,21 @@ def run_fraction_experiment(
         loss_reduction_mode=base_config["loss_reduction_mode"],
         early_stop_monitor=base_config["early_stop_monitor"],
         scheduler_monitor=base_config["scheduler_monitor"],
+
+        # augmentation + normalization
+        augment_train=base_config["augment_train"],
+        normalize_mode=base_config["normalize_mode"],
+        aug_prob=base_config["aug_prob"],
+        hflip_prob=base_config["hflip_prob"],
+        vflip_prob=base_config["vflip_prob"],
+        rotation_degree=base_config["rotation_degree"],
+        rotation_prob=base_config["rotation_prob"],
+        use_color_jitter=base_config["use_color_jitter"],
+        color_jitter_prob=base_config["color_jitter_prob"],
+        brightness=base_config["brightness"],
+        contrast=base_config["contrast"],
+        saturation=base_config["saturation"],
+        hue=base_config["hue"],
     )
 
     kfold_summary_csv = os.path.join(kfold_save_root, "kfold_summary.csv")
@@ -236,7 +251,6 @@ def run_learning_curve_experiment(
 
     print(f"\nLearning curve summary saved to: {summary_csv_path}")
 
-    # Auto-generate plots
     plot_learning_curve(
         summary_csv=summary_csv_path,
         save_dir=save_root,
@@ -255,7 +269,7 @@ def main():
     base_config = {
         "n_splits": 5,
         "seed": 42,
-        "batch_size": 2,
+        "batch_size": 4,
         "target_size": [304, 304],   # JSON-friendly
         "num_classes": 1,
         "learning_rate": 1e-4,
@@ -270,8 +284,23 @@ def main():
         "ranking_metric": "dice",
         "crop_padding_for_train_loss": True,
         "loss_reduction_mode": "sample_mean",
-        "early_stop_monitor": "train_loss",
-        "scheduler_monitor": "train_loss",
+        "early_stop_monitor": "val_loss",
+        "scheduler_monitor": "val_loss",
+
+        # augmentation + normalization
+        "augment_train": True,
+        "normalize_mode": "fixed_05",
+        "aug_prob": 0.6,
+        "hflip_prob": 0.5,
+        "vflip_prob": 0.0,
+        "rotation_degree": 10,
+        "rotation_prob": 0.5,
+        "use_color_jitter": True,
+        "color_jitter_prob": 0.3,
+        "brightness": 0.2,
+        "contrast": 0.2,
+        "saturation": 0.2,
+        "hue": 0.02,
     }
 
     save_root = run_learning_curve_experiment(

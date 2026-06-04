@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torchvision
+import torchvision.transforms as T
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from sklearn.model_selection import KFold
 
@@ -117,6 +118,14 @@ def get_effective_pixel_count(mask_tensor):
     if mask_tensor.ndim == 2:
         return int(mask_tensor.shape[0] * mask_tensor.shape[1])
     raise ValueError(f"Unsupported mask shape: {mask_tensor.shape}")
+
+
+def get_normalize_transform(normalize_mode="none"):
+    if normalize_mode is None or normalize_mode == "none":
+        return None
+    if normalize_mode == "fixed_05":
+        return T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+    raise ValueError(f"Unsupported normalize_mode: {normalize_mode}")
 
 
 def compute_batch_loss(
@@ -480,13 +489,28 @@ def run_single_fold(
     crop_padding_for_train_loss=False,
     loss_reduction_mode="sample_mean",
     early_stop_monitor="val_dice",
-    scheduler_monitor="val_dice"
+    scheduler_monitor="val_dice",
+    augment_train=False,
+    normalize_mode="none",
+    aug_prob=0.5,
+    hflip_prob=0.5,
+    vflip_prob=0.0,
+    rotation_degree=10,
+    rotation_prob=0.5,
+    use_color_jitter=True,
+    color_jitter_prob=0.5,
+    brightness=0.2,
+    contrast=0.2,
+    saturation=0.2,
+    hue=0.02
 ):
     fold_dir = os.path.join(save_root, f"fold_{fold_id}")
     os.makedirs(fold_dir, exist_ok=True)
 
     save_samples_list(train_samples, os.path.join(fold_dir, "train_samples.txt"))
     save_samples_list(val_samples, os.path.join(fold_dir, "val_samples.txt"))
+
+    normalize = get_normalize_transform(normalize_mode)
 
     train_loader = get_segmentation_dataloader(
         samples=train_samples,
@@ -495,7 +519,20 @@ def run_single_fold(
         num_classes=num_classes,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=(device.type == "cuda")
+        pin_memory=(device.type == "cuda"),
+        augment=augment_train,
+        normalize=normalize,
+        aug_prob=aug_prob,
+        hflip_prob=hflip_prob,
+        vflip_prob=vflip_prob,
+        rotation_degree=rotation_degree,
+        rotation_prob=rotation_prob,
+        use_color_jitter=use_color_jitter,
+        color_jitter_prob=color_jitter_prob,
+        brightness=brightness,
+        contrast=contrast,
+        saturation=saturation,
+        hue=hue
     )
 
     val_loader = get_segmentation_dataloader(
@@ -505,7 +542,9 @@ def run_single_fold(
         num_classes=num_classes,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=(device.type == "cuda")
+        pin_memory=(device.type == "cuda"),
+        augment=False,
+        normalize=normalize
     )
 
     model = UNet(in_channels=3, num_classes=num_classes).to(device)
@@ -694,7 +733,20 @@ def run_kfold_training(
     crop_padding_for_train_loss=False,
     loss_reduction_mode="sample_mean",
     early_stop_monitor="val_dice",
-    scheduler_monitor="val_dice"
+    scheduler_monitor="val_dice",
+    augment_train=False,
+    normalize_mode="none",
+    aug_prob=0.5,
+    hflip_prob=0.5,
+    vflip_prob=0.0,
+    rotation_degree=10,
+    rotation_prob=0.5,
+    use_color_jitter=True,
+    color_jitter_prob=0.5,
+    brightness=0.2,
+    contrast=0.2,
+    saturation=0.2,
+    hue=0.02
 ):
     os.makedirs(save_root, exist_ok=True)
     set_seed(seed)
@@ -709,6 +761,8 @@ def run_kfold_training(
     all_samples = read_samples_from_txt(all_trainval_txt)
     print(f"Total train+val samples: {len(all_samples)}")
 
+    normalize = get_normalize_transform(normalize_mode)
+
     test_loader = None
     if test_txt is not None:
         test_loader = get_segmentation_dataloader_from_txt(
@@ -718,7 +772,9 @@ def run_kfold_training(
             num_classes=num_classes,
             shuffle=False,
             num_workers=num_workers,
-            pin_memory=(device.type == "cuda")
+            pin_memory=(device.type == "cuda"),
+            augment=False,
+            normalize=normalize
         )
 
     kf = KFold(n_splits=n_splits, shuffle=True, random_state=seed)
@@ -752,7 +808,20 @@ def run_kfold_training(
             crop_padding_for_train_loss=crop_padding_for_train_loss,
             loss_reduction_mode=loss_reduction_mode,
             early_stop_monitor=early_stop_monitor,
-            scheduler_monitor=scheduler_monitor
+            scheduler_monitor=scheduler_monitor,
+            augment_train=augment_train,
+            normalize_mode=normalize_mode,
+            aug_prob=aug_prob,
+            hflip_prob=hflip_prob,
+            vflip_prob=vflip_prob,
+            rotation_degree=rotation_degree,
+            rotation_prob=rotation_prob,
+            use_color_jitter=use_color_jitter,
+            color_jitter_prob=color_jitter_prob,
+            brightness=brightness,
+            contrast=contrast,
+            saturation=saturation,
+            hue=hue
         )
         fold_results.append(result)
 
@@ -846,7 +915,6 @@ def run_kfold_training(
             values = [row[metric] for row in all_fold_test_results]
             print(f"{metric}: mean={np.mean(values):.4f}, std={np.std(values):.4f}")
 
-
 '''
 def main():
     torch.backends.cudnn.benchmark = True
@@ -859,11 +927,11 @@ def main():
         "test_txt": test_txt,
         "n_splits": 5,
         "seed": 42,
-        "batch_size": 8,
-        "target_size": (672, 928),
+        "batch_size": 4,
+        "target_size": (320, 320),
         "num_classes": 1,
         "learning_rate": 1e-4,
-        "num_workers": 12,
+        "num_workers": 0,
         "max_epochs": 200,
         "patience": 15,
         "min_delta": 1e-4,
@@ -875,8 +943,22 @@ def main():
         "ranking_metric": "dice",
         "crop_padding_for_train_loss": True,
         "loss_reduction_mode": "sample_mean",
-        "early_stop_monitor": "train_loss",   # "train_loss" / "val_loss" / "val_dice"
-        "scheduler_monitor": "train_loss",    # "train_loss" / "val_loss" / "val_dice"
+        "early_stop_monitor": "val_loss",
+        "scheduler_monitor": "val_loss",
+
+        "augment_train": True,
+        "normalize_mode": "fixed_05",
+        "aug_prob": 0.5,
+        "hflip_prob": 0.5,
+        "vflip_prob": 0.0,
+        "rotation_degree": 10,
+        "rotation_prob": 0.5,
+        "use_color_jitter": True,
+        "color_jitter_prob": 0.3,
+        "brightness": 0.2,
+        "contrast": 0.2,
+        "saturation": 0.2,
+        "hue": 0.02,
     }
 
     temp_model = UNet(in_channels=3, num_classes=config["num_classes"])
@@ -902,6 +984,7 @@ Experiment notes:
 - Validation/Test metrics are computed after removing padding
 - Training loss supports sample_mean and pixel_weighted
 - Early stopping and LR scheduler monitors are configurable
+- Training augmentation is enabled probabilistically via aug_prob
         """
     )
 
@@ -927,7 +1010,20 @@ Experiment notes:
         crop_padding_for_train_loss=config["crop_padding_for_train_loss"],
         loss_reduction_mode=config["loss_reduction_mode"],
         early_stop_monitor=config["early_stop_monitor"],
-        scheduler_monitor=config["scheduler_monitor"]
+        scheduler_monitor=config["scheduler_monitor"],
+        augment_train=config["augment_train"],
+        normalize_mode=config["normalize_mode"],
+        aug_prob=config["aug_prob"],
+        hflip_prob=config["hflip_prob"],
+        vflip_prob=config["vflip_prob"],
+        rotation_degree=config["rotation_degree"],
+        rotation_prob=config["rotation_prob"],
+        use_color_jitter=config["use_color_jitter"],
+        color_jitter_prob=config["color_jitter_prob"],
+        brightness=config["brightness"],
+        contrast=config["contrast"],
+        saturation=config["saturation"],
+        hue=config["hue"]
     )
 
 
