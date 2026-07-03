@@ -71,10 +71,11 @@ def split_dataset(
 
         if base+"_mask" in mask_dict:
             print(base)
-            mpath = mask_dict[base + "_mask"]
+            fpath = fpath.replace("\\", "/")
+            mpath = mask_dict[base + "_mask"].replace("\\", "/")
             if colab:
-                fpath = fpath.replace("\\", "/").split("../")[-1]
-                mpath = mask_dict[base+"_mask"].replace("\\", "/").split("../")[-1]
+                fpath = fpath.split("../")[-1]
+                mpath = mask_dict[base+"_mask"].split("../")[-1]
             pairs.append((fpath, mpath))
         else:
             # print(fpath, mask_dict[base+"_mask"])

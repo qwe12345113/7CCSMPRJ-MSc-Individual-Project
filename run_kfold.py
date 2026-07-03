@@ -9,6 +9,8 @@ import platform
 from datetime import datetime
 
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import torch
@@ -34,6 +36,7 @@ from prediction_result import (
     binary_segmentation_metrics_from_cropped,
 )
 from model import UNet
+import gc
 
 
 def set_seed(seed=42):
@@ -847,7 +850,8 @@ def run_kfold_training(
                 device=device,
                 save_dir=test_save_dir,
                 save_overlay_samples=0,
-                use_amp=use_amp
+                use_amp=use_amp,
+                normalize_mode=normalize_mode
             )
 
             fold_test_result["fold"] = fold_id
@@ -878,8 +882,23 @@ def run_kfold_training(
                 case_groups=case_groups,
                 device=device,
                 save_dir=os.path.join(test_save_dir, "ranked_cases"),
-                use_amp=use_amp
+                use_amp=use_amp,
+                normalize_mode=normalize_mode
             )
+            # ---- fold cleanup ----
+            try:
+                del model
+            except:
+                pass
+
+            try:
+                del criterion
+            except:
+                pass
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     save_kfold_summary_csv(fold_results, os.path.join(save_root, "kfold_summary.csv"))
 

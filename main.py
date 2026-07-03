@@ -8,7 +8,6 @@ import numpy as np
 
 from dataset_sampling import (
     load_trainval_samples,
-    sample_fraction_samples,
     save_subset_txt,
     fraction_to_tag,
 )
@@ -54,10 +53,6 @@ def read_kfold_summary_csv(csv_path: str) -> List[Dict[str, Any]]:
 
 
 def read_test_summary_csv(csv_path: str) -> Dict[str, Dict[str, float]]:
-    """
-    Expected format:
-        metric,mean,std
-    """
     result = {}
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -104,7 +99,6 @@ def build_fraction_summary(
 
     if test_summary_csv is not None and os.path.exists(test_summary_csv):
         test_summary = read_test_summary_csv(test_summary_csv)
-
         for metric in ["dice", "iou", "precision", "recall", "accuracy", "test_loss"]:
             if metric in test_summary:
                 summary[f"test_{metric}_mean"] = test_summary[metric]["mean"]
@@ -124,31 +118,88 @@ def save_learning_curve_summary(rows: List[Dict[str, Any]], save_path: str) -> N
         writer.writerows(rows)
 
 
+def sample_by_count(samples, count: int, seed: int = 42, nested: bool = True):
+    if count <= 0:
+        raise ValueError(f"count must be > 0, got {count}")
+
+    total = len(samples)
+    count = min(count, total)
+
+    shuffled = samples.copy()
+    rng = np.random.default_rng(seed)
+    indices = np.arange(total)
+    rng.shuffle(indices)
+    shuffled = [samples[i] for i in indices]
+
+    if nested:
+        return shuffled[:count]
+
+    rng2 = np.random.default_rng(seed + count)
+    selected_idx = rng2.choice(total, size=count, replace=False)
+    return [samples[i] for i in selected_idx]
+
+
+def resolve_subset_samples(samples, subset_value, mode="fraction", seed=42, nested=True):
+    total = len(samples)
+
+    if mode == "fraction":
+        fraction = float(subset_value)
+        if not (0 < fraction <= 1.0):
+            raise ValueError(f"fraction must be in (0,1], got {fraction}")
+
+        count = max(1, int(round(total * fraction)))
+        subset = sample_by_count(samples, count=count, seed=seed, nested=nested)
+        return subset, fraction, count
+
+    if mode == "count":
+        count = int(subset_value)
+        if count <= 0:
+            raise ValueError(f"count must be > 0, got {count}")
+
+        count = min(count, total)
+        fraction = count / total
+        subset = sample_by_count(samples, count=count, seed=seed, nested=nested)
+        return subset, fraction, count
+
+    raise ValueError(f"Unsupported mode: {mode}")
+
+
+def make_subset_tag(mode, subset_value, fraction, count):
+    if mode == "fraction":
+        return f"frac_{fraction_to_tag(float(subset_value))}"
+    if mode == "count":
+        return f"count_{count}"
+    raise ValueError(f"Unsupported mode: {mode}")
+
+
 def run_fraction_experiment(
-    fraction: float,
+    subset_value,
+    subset_mode: str,
     all_samples,
     test_txt: str,
     base_config: Dict[str, Any],
     root_save_dir: str
 ) -> Dict[str, Any]:
-    frac_tag = fraction_to_tag(fraction)
-    fraction_dir = os.path.join(root_save_dir, f"fraction_{frac_tag}")
-    os.makedirs(fraction_dir, exist_ok=True)
-
-    subset_samples = sample_fraction_samples(
+    subset_samples, fraction, count = resolve_subset_samples(
         samples=all_samples,
-        fraction=fraction,
+        subset_value=subset_value,
+        mode=subset_mode,
         seed=base_config["seed"],
         nested=True
     )
 
-    subset_txt_path = os.path.join(fraction_dir, f"trainval_subset_{frac_tag}.txt")
+    subset_tag = make_subset_tag(subset_mode, subset_value, fraction, count)
+    fraction_dir = os.path.join(root_save_dir, subset_tag)
+    os.makedirs(fraction_dir, exist_ok=True)
+
+    subset_txt_path = os.path.join(fraction_dir, f"trainval_subset_{subset_tag}.txt")
     save_subset_txt(subset_samples, subset_txt_path)
 
     kfold_save_root = os.path.join(fraction_dir, "kfold_run")
     os.makedirs(kfold_save_root, exist_ok=True)
 
-    print(f"\n===== Learning Curve Fraction: {fraction:.2f} ({len(subset_samples)} samples) =====")
+    print(f"\n===== Learning Curve Subset: {subset_tag} =====")
+    print(f"Fraction: {fraction:.4f} | Samples: {count}")
     print(f"Subset txt saved to: {subset_txt_path}")
     print(f"K-fold results will be saved to: {kfold_save_root}")
 
@@ -175,8 +226,6 @@ def run_fraction_experiment(
         loss_reduction_mode=base_config["loss_reduction_mode"],
         early_stop_monitor=base_config["early_stop_monitor"],
         scheduler_monitor=base_config["scheduler_monitor"],
-
-        # augmentation + normalization
         augment_train=base_config["augment_train"],
         normalize_mode=base_config["normalize_mode"],
         aug_prob=base_config["aug_prob"],
@@ -197,11 +246,14 @@ def run_fraction_experiment(
 
     summary = build_fraction_summary(
         fraction=fraction,
-        num_samples=len(subset_samples),
+        num_samples=count,
         kfold_summary_csv=kfold_summary_csv,
         test_summary_csv=test_summary_csv if os.path.exists(test_summary_csv) else None
     )
 
+    summary["subset_mode"] = subset_mode
+    summary["subset_value"] = subset_value
+    summary["subset_tag"] = subset_tag
     summary["fraction_dir"] = fraction_dir
     summary["subset_txt"] = subset_txt_path
     summary["kfold_summary_csv"] = kfold_summary_csv
@@ -212,7 +264,8 @@ def run_fraction_experiment(
 def run_learning_curve_experiment(
     trainval_txt: str,
     test_txt: str,
-    fractions: List[float],
+    subset_values: List[float],
+    subset_sizes_mode: str,
     base_config: Dict[str, Any],
     save_root: str = None,
     plot_x_mode: str = "fraction"
@@ -227,7 +280,8 @@ def run_learning_curve_experiment(
     lc_config = {
         "trainval_txt": trainval_txt,
         "test_txt": test_txt,
-        "fractions": fractions,
+        "subset_sizes_mode": subset_sizes_mode,
+        "subset_values": subset_values,
         "base_config": base_config,
         "total_trainval_samples": len(all_samples),
         "plot_x_mode": plot_x_mode,
@@ -236,9 +290,10 @@ def run_learning_curve_experiment(
 
     summary_rows = []
 
-    for fraction in fractions:
+    for subset_value in subset_values:
         summary = run_fraction_experiment(
-            fraction=fraction,
+            subset_value=subset_value,
+            subset_mode=subset_sizes_mode,
             all_samples=all_samples,
             test_txt=test_txt,
             base_config=base_config,
@@ -260,32 +315,42 @@ def run_learning_curve_experiment(
     return save_root
 
 
+
 def main():
     trainval_txt = "./train_val.txt"
     test_txt = "./test.txt"
 
-    fractions = [0.25, 0.50, 0.75, 1.00]
+    # "fraction" -> subset_values 填比例
+    # "count"    -> subset_values 填實際筆數
+    subset_sizes_mode = "count"
+
+    # mode = "fraction" 時，例如：
+    # subset_values = [0.25, 0.50, 0.75, 1.00]
+
+    # mode = "count" 時，例如：
+    #subset_values = [438, 876, 1315, 1753, 3600]
+    subset_values = [3600]
 
     base_config = {
         "n_splits": 5,
-        "seed": 42,
-        "batch_size": 4,
+        "seed": 902,
+        "batch_size": 2,
         "target_size": [304, 304],   # JSON-friendly
         "num_classes": 1,
         "learning_rate": 1e-4,
         "num_workers": 0,
         "max_epochs": 200,
-        "patience": 15,
+        "patience": 5,
         "min_delta": 1e-4,
         "binary_pos_weight": 3.0,
         "multiclass_weights": None,
         "use_amp": True,
-        "n_case_samples": 5,
+        "n_case_samples": 15,
         "ranking_metric": "dice",
         "crop_padding_for_train_loss": True,
         "loss_reduction_mode": "sample_mean",
-        "early_stop_monitor": "val_loss",
-        "scheduler_monitor": "val_loss",
+        "early_stop_monitor": "val_loss", # val_dice, val_loss, train_loss
+        "scheduler_monitor": "val_loss", # val_dice, val_loss, train_loss
 
         # augmentation + normalization
         "augment_train": True,
@@ -303,13 +368,16 @@ def main():
         "hue": 0.02,
     }
 
+    plot_x_mode = "num_samples" if subset_sizes_mode == "count" else "fraction"
+
     save_root = run_learning_curve_experiment(
         trainval_txt=trainval_txt,
         test_txt=test_txt,
-        fractions=fractions,
+        subset_values=subset_values,
+        subset_sizes_mode=subset_sizes_mode,
         base_config=base_config,
         save_root=None,
-        plot_x_mode="fraction"   # or "num_samples"
+        plot_x_mode=plot_x_mode
     )
 
     print(f"\nAll learning curve results saved under: {save_root}")
