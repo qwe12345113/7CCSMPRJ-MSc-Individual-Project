@@ -132,12 +132,12 @@ def get_normalize_transform(normalize_mode="none"):
 
 
 def compute_batch_loss(
-    outputs,
-    masks,
-    paddings,
-    criterion,
-    crop_padding_for_loss=False,
-    loss_reduction_mode="sample_mean"
+        outputs,
+        masks,
+        paddings,
+        criterion,
+        crop_padding_for_loss=False,
+        loss_reduction_mode="sample_mean"
 ):
     if loss_reduction_mode not in ["sample_mean", "pixel_weighted"]:
         raise ValueError(f"Unsupported loss_reduction_mode: {loss_reduction_mode}")
@@ -208,14 +208,14 @@ def get_monitor_value(monitor_name, train_loss, val_loss, val_dice):
 
 
 def train_one_epoch(
-    model,
-    dataloader,
-    optimizer,
-    criterion,
-    device,
-    use_amp=True,
-    crop_padding_for_train_loss=False,
-    loss_reduction_mode="sample_mean"
+        model,
+        dataloader,
+        optimizer,
+        criterion,
+        device,
+        use_amp=True,
+        crop_padding_for_train_loss=False,
+        loss_reduction_mode="sample_mean"
 ):
     model.train()
     running_loss = 0.0
@@ -432,7 +432,17 @@ def save_kfold_summary_csv(results, save_path):
 def save_all_folds_test_results_csv(all_fold_test_results, save_path):
     with open(save_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["fold", "test_loss", "dice", "iou", "precision", "recall", "accuracy"])
+        writer.writerow([
+            "fold",
+            "test_loss",
+            "dice",
+            "iou",
+            "precision",
+            "recall",
+            "accuracy",
+            "normalized_surface_distance",
+            "normalized_surface_dice",
+        ])
         for row in all_fold_test_results:
             writer.writerow([
                 row["fold"],
@@ -442,11 +452,22 @@ def save_all_folds_test_results_csv(all_fold_test_results, save_path):
                 row["precision"],
                 row["recall"],
                 row["accuracy"],
+                row["normalized_surface_distance"],
+                row["normalized_surface_dice"]
             ])
 
 
 def save_all_folds_test_summary_csv(all_fold_test_results, save_path):
-    metrics = ["test_loss", "dice", "iou", "precision", "recall", "accuracy"]
+    metrics = [
+        "test_loss",
+        "dice",
+        "iou",
+        "precision",
+        "recall",
+        "accuracy",
+        "normalized_surface_distance",
+        "normalized_surface_dice",
+    ]
     with open(save_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["metric", "mean", "std"])
@@ -473,39 +494,39 @@ def plot_all_folds_test_metrics(all_fold_test_results, save_dir):
 
 
 def run_single_fold(
-    fold_id,
-    train_samples,
-    val_samples,
-    device,
-    save_root,
-    batch_size=8,
-    target_size=(672, 928),
-    num_classes=1,
-    learning_rate=1e-4,
-    num_workers=8,
-    max_epochs=200,
-    patience=15,
-    min_delta=1e-4,
-    binary_pos_weight=None,
-    multiclass_weights=None,
-    use_amp=True,
-    crop_padding_for_train_loss=False,
-    loss_reduction_mode="sample_mean",
-    early_stop_monitor="val_dice",
-    scheduler_monitor="val_dice",
-    augment_train=False,
-    normalize_mode="none",
-    aug_prob=0.5,
-    hflip_prob=0.5,
-    vflip_prob=0.0,
-    rotation_degree=10,
-    rotation_prob=0.5,
-    use_color_jitter=True,
-    color_jitter_prob=0.5,
-    brightness=0.2,
-    contrast=0.2,
-    saturation=0.2,
-    hue=0.02
+        fold_id,
+        train_samples,
+        val_samples,
+        device,
+        save_root,
+        batch_size=8,
+        target_size=(672, 928),
+        num_classes=1,
+        learning_rate=1e-4,
+        num_workers=8,
+        max_epochs=200,
+        patience=15,
+        min_delta=1e-4,
+        binary_pos_weight=None,
+        multiclass_weights=None,
+        use_amp=True,
+        crop_padding_for_train_loss=False,
+        loss_reduction_mode="sample_mean",
+        early_stop_monitor="val_dice",
+        scheduler_monitor="val_dice",
+        augment_train=False,
+        normalize_mode="none",
+        aug_prob=0.5,
+        hflip_prob=0.5,
+        vflip_prob=0.0,
+        rotation_degree=10,
+        rotation_prob=0.5,
+        use_color_jitter=True,
+        color_jitter_prob=0.5,
+        brightness=0.2,
+        contrast=0.2,
+        saturation=0.2,
+        hue=0.02
 ):
     fold_dir = os.path.join(save_root, f"fold_{fold_id}")
     os.makedirs(fold_dir, exist_ok=True)
@@ -715,41 +736,41 @@ def run_single_fold(
 
 
 def run_kfold_training(
-    all_trainval_txt,
-    test_txt=None,
-    n_splits=5,
-    seed=42,
-    batch_size=8,
-    target_size=(672, 928),
-    num_classes=1,
-    learning_rate=1e-4,
-    num_workers=8,
-    max_epochs=200,
-    patience=15,
-    min_delta=1e-4,
-    binary_pos_weight=None,
-    multiclass_weights=None,
-    save_root="kfold_results",
-    use_amp=True,
-    n_case_samples=5,
-    ranking_metric="dice",
-    crop_padding_for_train_loss=False,
-    loss_reduction_mode="sample_mean",
-    early_stop_monitor="val_dice",
-    scheduler_monitor="val_dice",
-    augment_train=False,
-    normalize_mode="none",
-    aug_prob=0.5,
-    hflip_prob=0.5,
-    vflip_prob=0.0,
-    rotation_degree=10,
-    rotation_prob=0.5,
-    use_color_jitter=True,
-    color_jitter_prob=0.5,
-    brightness=0.2,
-    contrast=0.2,
-    saturation=0.2,
-    hue=0.02
+        all_trainval_txt,
+        test_txt=None,
+        n_splits=5,
+        seed=42,
+        batch_size=8,
+        target_size=(672, 928),
+        num_classes=1,
+        learning_rate=1e-4,
+        num_workers=8,
+        max_epochs=200,
+        patience=15,
+        min_delta=1e-4,
+        binary_pos_weight=None,
+        multiclass_weights=None,
+        save_root="kfold_results",
+        use_amp=True,
+        n_case_samples=5,
+        ranking_metric="dice",
+        crop_padding_for_train_loss=False,
+        loss_reduction_mode="sample_mean",
+        early_stop_monitor="val_dice",
+        scheduler_monitor="val_dice",
+        augment_train=False,
+        normalize_mode="none",
+        aug_prob=0.5,
+        hflip_prob=0.5,
+        vflip_prob=0.0,
+        rotation_degree=10,
+        rotation_prob=0.5,
+        use_color_jitter=True,
+        color_jitter_prob=0.5,
+        brightness=0.2,
+        contrast=0.2,
+        saturation=0.2,
+        hue=0.02
 ):
     os.makedirs(save_root, exist_ok=True)
     set_seed(seed)

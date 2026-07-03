@@ -1,11 +1,13 @@
 import os
 import csv
 import numpy as np
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import torch
+from scipy.ndimage import binary_erosion, distance_transform_edt
 
 
 def remove_padding_from_tensor(tensor, padding):
@@ -147,6 +149,130 @@ def binary_segmentation_metrics_from_cropped(pred_mask, gt_mask, eps=1e-7):
     }
 
 
+def _to_numpy_binary_mask(mask):
+    if isinstance(mask, torch.Tensor):
+        mask = mask.detach().cpu().numpy()
+
+    if mask.ndim == 3:
+        mask = np.squeeze(mask, axis=0)
+
+    return (mask > 0).astype(np.bool_)
+
+
+def _extract_surface(mask_bool):
+    """
+    2D binary surface extraction.
+    """
+    if mask_bool.sum() == 0:
+        return np.zeros_like(mask_bool, dtype=np.bool_)
+
+    structure = np.ones((3, 3), dtype=np.bool_)
+    eroded = binary_erosion(mask_bool, structure=structure, border_value=0)
+    surface = mask_bool ^ eroded
+    return surface
+
+
+def normalized_surface_metrics_from_cropped(
+    pred_mask,
+    gt_mask,
+    tolerance_px=None,
+    tolerance_ratio=0.01,
+    eps=1e-8
+):
+    """
+    Compute 2D normalized surface distance and normalized surface dice.
+
+    Definitions used here:
+    - normalized_surface_distance:
+        symmetric mean surface distance / image diagonal length
+    - normalized_surface_dice:
+        fraction of surface points within tolerance
+
+    Args:
+        pred_mask, gt_mask:
+            binary masks, [H, W] or [1, H, W]
+        tolerance_px:
+            fixed tolerance in pixels. If None, use tolerance_ratio * diagonal
+        tolerance_ratio:
+            used only when tolerance_px is None
+
+    Returns:
+        {
+            "normalized_surface_distance": ...,
+            "normalized_surface_dice": ...,
+            "surface_dice_tolerance_px": ...
+        }
+    """
+    pred = _to_numpy_binary_mask(pred_mask)
+    gt = _to_numpy_binary_mask(gt_mask)
+
+    h, w = gt.shape
+    diagonal = max(float(np.sqrt(h * h + w * w)), eps)
+
+    if tolerance_px is None:
+        tolerance_px = float(tolerance_ratio * diagonal)
+    else:
+        tolerance_px = float(tolerance_px)
+
+    # both empty => perfect
+    if pred.sum() == 0 and gt.sum() == 0:
+        return {
+            "normalized_surface_distance": 0.0,
+            "normalized_surface_dice": 1.0,
+            "surface_dice_tolerance_px": tolerance_px,
+        }
+
+    # one empty => worst
+    if pred.sum() == 0 or gt.sum() == 0:
+        return {
+            "normalized_surface_distance": 1.0,
+            "normalized_surface_dice": 0.0,
+            "surface_dice_tolerance_px": tolerance_px,
+        }
+
+    pred_surface = _extract_surface(pred)
+    gt_surface = _extract_surface(gt)
+
+    # safety fallback
+    if pred_surface.sum() == 0 and gt_surface.sum() == 0:
+        return {
+            "normalized_surface_distance": 0.0,
+            "normalized_surface_dice": 1.0,
+            "surface_dice_tolerance_px": tolerance_px,
+        }
+
+    if pred_surface.sum() == 0 or gt_surface.sum() == 0:
+        return {
+            "normalized_surface_distance": 1.0,
+            "normalized_surface_dice": 0.0,
+            "surface_dice_tolerance_px": tolerance_px,
+        }
+
+    # Distance-to-surface maps:
+    # distance_transform_edt computes distance to nearest zero.
+    # So use (~surface) where surface pixels are False.
+    dt_to_gt_surface = distance_transform_edt(~gt_surface)
+    dt_to_pred_surface = distance_transform_edt(~pred_surface)
+
+    pred_to_gt = dt_to_gt_surface[pred_surface]
+    gt_to_pred = dt_to_pred_surface[gt_surface]
+
+    symmetric_mean_surface_distance = (pred_to_gt.mean() + gt_to_pred.mean()) / 2.0
+    normalized_surface_distance = float(symmetric_mean_surface_distance / diagonal)
+
+    pred_within_tol = np.sum(pred_to_gt <= tolerance_px)
+    gt_within_tol = np.sum(gt_to_pred <= tolerance_px)
+    total_surface_points = len(pred_to_gt) + len(gt_to_pred)
+
+    normalized_surface_dice = float((pred_within_tol + gt_within_tol) / max(total_surface_points, 1))
+
+    return {
+        "normalized_surface_distance": normalized_surface_distance,
+        "normalized_surface_dice": normalized_surface_dice,
+        "surface_dice_tolerance_px": tolerance_px,
+    }
+
+
 def save_overlay_visualization(image_np, gt_np, pred_np, save_path, title_text=""):
     """
     Save visualization with:
@@ -211,6 +337,9 @@ def save_per_sample_metrics_csv(rows, save_path):
         "precision",
         "recall",
         "accuracy",
+        "normalized_surface_distance",
+        "normalized_surface_dice",
+        "surface_dice_tolerance_px",
     ]
 
     with open(save_path, "w", newline="", encoding="utf-8") as f:
@@ -229,7 +358,9 @@ def test_one_epoch_with_overlay(
     save_dir,
     save_overlay_samples=10,
     use_amp=True,
-    normalize_mode="none"
+    normalize_mode="none",
+    surface_dice_tolerance_px=None,
+    surface_dice_tolerance_ratio=0.01
 ):
     """
     Test model on dataloader.
@@ -249,11 +380,14 @@ def test_one_epoch_with_overlay(
 
     total_loss = 0.0
     sample_count = 0
+
     dice_scores = []
     iou_scores = []
     precision_scores = []
     recall_scores = []
     accuracy_scores = []
+    ns_dist_scores = []
+    ns_dice_scores = []
 
     all_sample_rows = []
     global_idx = 0
@@ -288,12 +422,20 @@ def test_one_epoch_with_overlay(
             total_loss += loss_i.item()
 
             metrics = binary_segmentation_metrics_from_cropped(pred_crop, mask_crop)
+            surface_metrics = normalized_surface_metrics_from_cropped(
+                pred_crop,
+                mask_crop,
+                tolerance_px=surface_dice_tolerance_px,
+                tolerance_ratio=surface_dice_tolerance_ratio
+            )
 
             dice_scores.append(metrics["dice"])
             iou_scores.append(metrics["iou"])
             precision_scores.append(metrics["precision"])
             recall_scores.append(metrics["recall"])
             accuracy_scores.append(metrics["accuracy"])
+            ns_dist_scores.append(surface_metrics["normalized_surface_distance"])
+            ns_dice_scores.append(surface_metrics["normalized_surface_dice"])
 
             image_path = image_paths[i]
             mask_path = mask_paths[i]
@@ -309,6 +451,9 @@ def test_one_epoch_with_overlay(
                 "precision": metrics["precision"],
                 "recall": metrics["recall"],
                 "accuracy": metrics["accuracy"],
+                "normalized_surface_distance": surface_metrics["normalized_surface_distance"],
+                "normalized_surface_dice": surface_metrics["normalized_surface_dice"],
+                "surface_dice_tolerance_px": surface_metrics["surface_dice_tolerance_px"],
             }
             all_sample_rows.append(row)
 
@@ -327,13 +472,15 @@ def test_one_epoch_with_overlay(
                 title_text = (
                     f"sample={global_idx} | image={row['image_name']} | "
                     f"dice={row['dice']:.4f} | iou={row['iou']:.4f} | "
-                    f"precision={row['precision']:.4f} | recall={row['recall']:.4f}"
+                    f"ns_dist={row['normalized_surface_distance']:.4f} | "
+                    f"ns_dice={row['normalized_surface_dice']:.4f}"
                 )
 
                 stem = os.path.splitext(row["image_name"])[0]
                 filename = (
                     f"{global_idx:04d}_{stem}"
-                    f"_dice_{row['dice']:.4f}_iou_{row['iou']:.4f}.png"
+                    f"_dice_{row['dice']:.4f}"
+                    f"_nsd_{row['normalized_surface_dice']:.4f}.png"
                 )
 
                 save_overlay_visualization(
@@ -356,6 +503,8 @@ def test_one_epoch_with_overlay(
         "precision": float(np.mean(precision_scores)) if precision_scores else 0.0,
         "recall": float(np.mean(recall_scores)) if recall_scores else 0.0,
         "accuracy": float(np.mean(accuracy_scores)) if accuracy_scores else 0.0,
+        "normalized_surface_distance": float(np.mean(ns_dist_scores)) if ns_dist_scores else 0.0,
+        "normalized_surface_dice": float(np.mean(ns_dice_scores)) if ns_dice_scores else 0.0,
     }
 
     save_per_sample_metrics_csv(
@@ -369,15 +518,24 @@ def test_one_epoch_with_overlay(
 def plot_test_metrics(test_result, save_dir):
     os.makedirs(save_dir, exist_ok=True)
 
-    metric_names = ["dice", "iou", "precision", "recall", "accuracy"]
+    metric_names = [
+        "dice",
+        "iou",
+        "precision",
+        "recall",
+        "accuracy",
+        "normalized_surface_distance",
+        "normalized_surface_dice",
+    ]
     metric_values = [test_result[m] for m in metric_names]
 
-    plt.figure(figsize=(8, 5))
+    plt.figure(figsize=(10, 5))
     plt.bar(metric_names, metric_values)
     plt.ylim(0, 1.0)
     plt.ylabel("Score")
     plt.title("Test Metrics")
     plt.grid(axis="y")
+    plt.xticks(rotation=20, ha="right")
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, "test_metrics.png"), dpi=150)
     plt.close()
@@ -387,17 +545,19 @@ def plot_test_summary(test_result, save_dir):
     os.makedirs(save_dir, exist_ok=True)
 
     lines = [
-        f"test_loss : {test_result['test_loss']:.6f}",
-        f"dice      : {test_result['dice']:.6f}",
-        f"iou       : {test_result['iou']:.6f}",
-        f"precision : {test_result['precision']:.6f}",
-        f"recall    : {test_result['recall']:.6f}",
-        f"accuracy  : {test_result['accuracy']:.6f}",
+        f"test_loss                  : {test_result['test_loss']:.6f}",
+        f"dice                       : {test_result['dice']:.6f}",
+        f"iou                        : {test_result['iou']:.6f}",
+        f"precision                  : {test_result['precision']:.6f}",
+        f"recall                     : {test_result['recall']:.6f}",
+        f"accuracy                   : {test_result['accuracy']:.6f}",
+        f"normalized_surface_distance: {test_result['normalized_surface_distance']:.6f}",
+        f"normalized_surface_dice    : {test_result['normalized_surface_dice']:.6f}",
     ]
 
-    plt.figure(figsize=(7, 4))
+    plt.figure(figsize=(8, 4.5))
     plt.axis("off")
-    plt.text(0.02, 0.98, "\n".join(lines), va="top", family="monospace", fontsize=11)
+    plt.text(0.02, 0.98, "\n".join(lines), va="top", family="monospace", fontsize=10)
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, "test_summary.png"), dpi=150)
     plt.close()
@@ -413,13 +573,33 @@ def select_ranked_cases(all_sample_rows, metric="dice", n_per_group=5):
     if metric not in all_sample_rows[0]:
         raise ValueError(f"Metric '{metric}' not found in sample rows")
 
-    sorted_rows = sorted(all_sample_rows, key=lambda x: x[metric])
+    higher_is_better = {
+        "dice",
+        "iou",
+        "precision",
+        "recall",
+        "accuracy",
+        "normalized_surface_dice",
+    }
+    lower_is_better = {
+        "normalized_surface_distance",
+    }
+
+    if metric in higher_is_better:
+        sorted_rows = sorted(all_sample_rows, key=lambda x: x[metric])  # low -> high
+        worst = sorted_rows[:min(n_per_group, len(sorted_rows))]
+        best = sorted_rows[-min(n_per_group, len(sorted_rows)):][::-1]
+    elif metric in lower_is_better:
+        sorted_rows = sorted(all_sample_rows, key=lambda x: x[metric])  # low -> high
+        best = sorted_rows[:min(n_per_group, len(sorted_rows))]
+        worst = sorted_rows[-min(n_per_group, len(sorted_rows)):][::-1]
+    else:
+        sorted_rows = sorted(all_sample_rows, key=lambda x: x[metric])
+        worst = sorted_rows[:min(n_per_group, len(sorted_rows))]
+        best = sorted_rows[-min(n_per_group, len(sorted_rows)):][::-1]
 
     n_total = len(sorted_rows)
     n = min(n_per_group, n_total)
-
-    worst = sorted_rows[:n]
-    best = sorted_rows[-n:][::-1]
 
     mid = n_total // 2
     half = n // 2
@@ -449,7 +629,10 @@ def save_selected_cases_csv(case_groups, save_path):
             "iou",
             "precision",
             "recall",
-            "accuracy"
+            "accuracy",
+            "normalized_surface_distance",
+            "normalized_surface_dice",
+            "surface_dice_tolerance_px",
         ])
 
         for group_name, rows in case_groups.items():
@@ -467,6 +650,9 @@ def save_selected_cases_csv(case_groups, save_path):
                     row["precision"],
                     row["recall"],
                     row["accuracy"],
+                    row.get("normalized_surface_distance", ""),
+                    row.get("normalized_surface_dice", ""),
+                    row.get("surface_dice_tolerance_px", ""),
                 ])
 
 
@@ -519,7 +705,8 @@ def save_ranked_case_visualizations(
                 f"{group_name.upper()} | rank={rank} | sample={sample_id} | "
                 f"image={row.get('image_name', 'N/A')} | "
                 f"dice={row['dice']:.4f} | iou={row['iou']:.4f} | "
-                f"precision={row['precision']:.4f} | recall={row['recall']:.4f}"
+                f"ns_dist={row.get('normalized_surface_distance', 0.0):.4f} | "
+                f"ns_dice={row.get('normalized_surface_dice', 0.0):.4f}"
             )
 
             orig_name = row.get("image_name", f"sample_{sample_id:04d}")
@@ -528,7 +715,8 @@ def save_ranked_case_visualizations(
             filename = (
                 f"{rank:02d}_{orig_stem}"
                 f"_sample_{sample_id:04d}"
-                f"_dice_{row['dice']:.4f}_iou_{row['iou']:.4f}.png"
+                f"_dice_{row['dice']:.4f}"
+                f"_nsd_{row.get('normalized_surface_dice', 0.0):.4f}.png"
             )
 
             save_overlay_visualization(
