@@ -344,12 +344,267 @@ class EarlyStopping:
         return self.num_bad_epochs >= self.patience
 
 
-def build_loss_function(num_classes=1, binary_pos_weight=None, multiclass_weights=None, device="cpu"):
-    if num_classes == 1:
+class SoftDiceLoss(nn.Module):
+    """
+    Differentiable Dice loss for binary segmentation.
+
+    Inputs:
+        logits : [B, 1, H, W]
+        targets: [B, 1, H, W], values in {0, 1}
+    """
+    def __init__(self, smooth=1.0):
+        super().__init__()
+        self.smooth = smooth
+
+    def forward(self, logits, targets):
+        probs = torch.sigmoid(logits)
+        targets = targets.float()
+
+        dims = (1, 2, 3)
+        intersection = torch.sum(probs * targets, dim=dims)
+        denominator = torch.sum(probs, dim=dims) + torch.sum(targets, dim=dims)
+
+        dice = (2.0 * intersection + self.smooth) / (denominator + self.smooth)
+        return 1.0 - dice.mean()
+
+
+class SoftIoULoss(nn.Module):
+    """
+    Differentiable IoU/Jaccard loss for binary segmentation.
+
+    Inputs:
+        logits : [B, 1, H, W]
+        targets: [B, 1, H, W], values in {0, 1}
+    """
+    def __init__(self, smooth=1.0):
+        super().__init__()
+        self.smooth = smooth
+
+    def forward(self, logits, targets):
+        probs = torch.sigmoid(logits)
+        targets = targets.float()
+
+        dims = (1, 2, 3)
+        intersection = torch.sum(probs * targets, dim=dims)
+        total = torch.sum(probs, dim=dims) + torch.sum(targets, dim=dims)
+        union = total - intersection
+
+        iou = (intersection + self.smooth) / (union + self.smooth)
+        return 1.0 - iou.mean()
+
+
+class TverskyLoss(nn.Module):
+    """
+    Differentiable Tversky loss for binary segmentation.
+
+    alpha controls false positive penalty.
+    beta controls false negative penalty.
+
+    Common settings:
+        alpha=0.3, beta=0.7 -> penalize false negatives more, improve recall
+        alpha=0.7, beta=0.3 -> penalize false positives more, improve precision
+    """
+    def __init__(self, alpha=0.5, beta=0.5, smooth=1.0):
+        super().__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.smooth = smooth
+
+    def forward(self, logits, targets):
+        probs = torch.sigmoid(logits)
+        targets = targets.float()
+
+        dims = (1, 2, 3)
+        tp = torch.sum(probs * targets, dim=dims)
+        fp = torch.sum(probs * (1.0 - targets), dim=dims)
+        fn = torch.sum((1.0 - probs) * targets, dim=dims)
+
+        tversky = (tp + self.smooth) / (
+            tp + self.alpha * fp + self.beta * fn + self.smooth
+        )
+        return 1.0 - tversky.mean()
+
+
+class MultiLoss(nn.Module):
+    """
+    Weighted multi-loss for binary segmentation.
+
+    Supported components:
+        BCEWithLogitsLoss, SoftDiceLoss, SoftIoULoss, TverskyLoss
+
+    Example:
+        0.5 * BCE + 0.5 * Dice
+        0.4 * BCE + 0.4 * Dice + 0.2 * IoU
+    """
+    def __init__(
+        self,
+        binary_pos_weight=None,
+        bce_weight=0.5,
+        dice_weight=0.5,
+        iou_weight=0.0,
+        tversky_weight=0.0,
+        tversky_alpha=0.5,
+        tversky_beta=0.5,
+        smooth=1.0,
+        device="cpu"
+    ):
+        super().__init__()
+
         if binary_pos_weight is not None:
-            pos_weight = torch.tensor([binary_pos_weight], dtype=torch.float32, device=device)
-            return nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-        return nn.BCEWithLogitsLoss()
+            pos_weight = torch.tensor(
+                [binary_pos_weight],
+                dtype=torch.float32,
+                device=device
+            )
+            self.bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        else:
+            self.bce = nn.BCEWithLogitsLoss()
+
+        self.dice = SoftDiceLoss(smooth=smooth)
+        self.iou = SoftIoULoss(smooth=smooth)
+        self.tversky = TverskyLoss(
+            alpha=tversky_alpha,
+            beta=tversky_beta,
+            smooth=smooth
+        )
+
+        self.bce_weight = float(bce_weight)
+        self.dice_weight = float(dice_weight)
+        self.iou_weight = float(iou_weight)
+        self.tversky_weight = float(tversky_weight)
+
+        total_weight = (
+            self.bce_weight
+            + self.dice_weight
+            + self.iou_weight
+            + self.tversky_weight
+        )
+        if total_weight <= 0:
+            raise ValueError("At least one loss weight must be > 0.")
+
+    def forward(self, logits, targets):
+        targets = targets.float()
+        loss = logits.new_tensor(0.0)
+
+        if self.bce_weight > 0:
+            loss = loss + self.bce_weight * self.bce(logits, targets)
+
+        if self.dice_weight > 0:
+            loss = loss + self.dice_weight * self.dice(logits, targets)
+
+        if self.iou_weight > 0:
+            loss = loss + self.iou_weight * self.iou(logits, targets)
+
+        if self.tversky_weight > 0:
+            loss = loss + self.tversky_weight * self.tversky(logits, targets)
+
+        return loss
+
+
+def build_optimizer(model, optimizer_name="Adam", learning_rate=1e-4, weight_decay=0.0):
+    """
+    Build optimizer from config.
+
+    optimizer_name:
+        "Adam"  -> torch.optim.Adam
+        "AdamW" -> torch.optim.AdamW with decoupled weight decay
+    """
+    optimizer_name = str(optimizer_name).lower()
+
+    if optimizer_name == "adam":
+        return torch.optim.Adam(
+            model.parameters(),
+            lr=learning_rate,
+            weight_decay=weight_decay
+        )
+
+    if optimizer_name == "adamw":
+        return torch.optim.AdamW(
+            model.parameters(),
+            lr=learning_rate,
+            weight_decay=weight_decay
+        )
+
+    raise ValueError(f"Unsupported optimizer_name: {optimizer_name}")
+
+
+def build_loss_function(
+    num_classes=1,
+    binary_pos_weight=None,
+    multiclass_weights=None,
+    device="cpu",
+    loss_type="bce",
+    bce_weight=1.0,
+    dice_weight=0.0,
+    iou_weight=0.0,
+    tversky_weight=0.0,
+    tversky_alpha=0.5,
+    tversky_beta=0.5,
+    loss_smooth=1.0,
+):
+    """
+    Build loss function.
+
+    Binary segmentation loss_type options:
+        "bce"
+        "bce_dice"
+        "bce_dice_iou"
+        "bce_tversky"
+        "multi"
+
+    Notes:
+        - Binary logits should be raw logits, not sigmoid outputs.
+        - targets should be [B, 1, H, W] and values should be 0/1.
+    """
+    if num_classes == 1:
+        loss_type = str(loss_type).lower()
+
+        if loss_type == "bce":
+            if binary_pos_weight is not None:
+                pos_weight = torch.tensor(
+                    [binary_pos_weight],
+                    dtype=torch.float32,
+                    device=device
+                )
+                return nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+            return nn.BCEWithLogitsLoss()
+
+        if loss_type == "bce_dice":
+            # Safe default if config forgot to set dice_weight.
+            if dice_weight <= 0 and iou_weight <= 0 and tversky_weight <= 0:
+                bce_weight = 0.5
+                dice_weight = 0.5
+
+        elif loss_type == "bce_dice_iou":
+            # Safe default if config forgot to set dice/iou weights.
+            if dice_weight <= 0 and iou_weight <= 0 and tversky_weight <= 0:
+                bce_weight = 0.4
+                dice_weight = 0.4
+                iou_weight = 0.2
+
+        elif loss_type == "bce_tversky":
+            # Safe default if config forgot to set tversky_weight.
+            if tversky_weight <= 0 and dice_weight <= 0 and iou_weight <= 0:
+                bce_weight = 0.5
+                tversky_weight = 0.5
+
+        elif loss_type == "multi":
+            pass
+
+        else:
+            raise ValueError(f"Unsupported binary loss_type: {loss_type}")
+
+        return MultiLoss(
+            binary_pos_weight=binary_pos_weight,
+            bce_weight=bce_weight,
+            dice_weight=dice_weight,
+            iou_weight=iou_weight,
+            tversky_weight=tversky_weight,
+            tversky_alpha=tversky_alpha,
+            tversky_beta=tversky_beta,
+            smooth=loss_smooth,
+            device=device,
+        )
 
     if multiclass_weights is not None:
         class_weights = torch.tensor(multiclass_weights, dtype=torch.float32, device=device)
@@ -503,6 +758,16 @@ def run_single_fold(
         target_size=(672, 928),
         num_classes=1,
         learning_rate=1e-4,
+        optimizer_name="Adam",
+        weight_decay=0.0,
+        loss_type="bce",
+        bce_weight=1.0,
+        dice_weight=0.0,
+        iou_weight=0.0,
+        tversky_weight=0.0,
+        tversky_alpha=0.5,
+        tversky_beta=0.5,
+        loss_smooth=1.0,
         num_workers=8,
         max_epochs=200,
         patience=15,
@@ -576,14 +841,22 @@ def run_single_fold(
         num_classes=num_classes,
         binary_pos_weight=binary_pos_weight,
         multiclass_weights=multiclass_weights,
-        device=device
+        device=device,
+        loss_type=loss_type,
+        bce_weight=bce_weight,
+        dice_weight=dice_weight,
+        iou_weight=iou_weight,
+        tversky_weight=tversky_weight,
+        tversky_alpha=tversky_alpha,
+        tversky_beta=tversky_beta,
+        loss_smooth=loss_smooth,
     )
 
-    # optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=learning_rate,
-        weight_decay=1e-4
+    optimizer = build_optimizer(
+        model=model,
+        optimizer_name=optimizer_name,
+        learning_rate=learning_rate,
+        weight_decay=weight_decay
     )
 
     scheduler = ReduceLROnPlateau(
@@ -751,6 +1024,16 @@ def run_kfold_training(
         target_size=(672, 928),
         num_classes=1,
         learning_rate=1e-4,
+        optimizer_name="Adam",
+        weight_decay=0.0,
+        loss_type="bce",
+        bce_weight=1.0,
+        dice_weight=0.0,
+        iou_weight=0.0,
+        tversky_weight=0.0,
+        tversky_alpha=0.5,
+        tversky_beta=0.5,
+        loss_smooth=1.0,
         num_workers=8,
         max_epochs=200,
         patience=15,
@@ -791,6 +1074,14 @@ def run_kfold_training(
     print(f"loss_reduction_mode = {loss_reduction_mode}")
     print(f"early_stop_monitor = {early_stop_monitor}")
     print(f"scheduler_monitor = {scheduler_monitor}")
+    print(f"optimizer_name = {optimizer_name}")
+    print(f"weight_decay = {weight_decay}")
+    print(f"loss_type = {loss_type}")
+    print(
+        "loss_weights = "
+        f"bce:{bce_weight}, dice:{dice_weight}, iou:{iou_weight}, "
+        f"tversky:{tversky_weight}"
+    )
 
     all_samples = read_samples_from_txt(all_trainval_txt)
     print(f"Total train+val samples: {len(all_samples)}")
@@ -854,6 +1145,16 @@ def run_kfold_training(
             target_size=target_size,
             num_classes=num_classes,
             learning_rate=learning_rate,
+            optimizer_name=optimizer_name,
+            weight_decay=weight_decay,
+            loss_type=loss_type,
+            bce_weight=bce_weight,
+            dice_weight=dice_weight,
+            iou_weight=iou_weight,
+            tversky_weight=tversky_weight,
+            tversky_alpha=tversky_alpha,
+            tversky_beta=tversky_beta,
+            loss_smooth=loss_smooth,
             num_workers=num_workers,
             max_epochs=max_epochs,
             patience=patience,
@@ -893,7 +1194,15 @@ def run_kfold_training(
                 num_classes=num_classes,
                 binary_pos_weight=binary_pos_weight,
                 multiclass_weights=multiclass_weights,
-                device=device
+                device=device,
+                loss_type=loss_type,
+                bce_weight=bce_weight,
+                dice_weight=dice_weight,
+                iou_weight=iou_weight,
+                tversky_weight=tversky_weight,
+                tversky_alpha=tversky_alpha,
+                tversky_beta=tversky_beta,
+                loss_smooth=loss_smooth,
             )
 
             fold_test_result, all_sample_rows = test_one_epoch_with_overlay(

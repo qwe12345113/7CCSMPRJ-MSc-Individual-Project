@@ -3,7 +3,8 @@ import csv
 import json
 from datetime import datetime
 from typing import Dict, List, Any
-import time
+import time 
+
 import numpy as np
 
 from dataset_sampling import (
@@ -223,6 +224,16 @@ def run_fraction_experiment(
         target_size=tuple(base_config["target_size"]),
         num_classes=base_config["num_classes"],
         learning_rate=base_config["learning_rate"],
+        optimizer_name=base_config["optimizer_name"],
+        weight_decay=base_config["weight_decay"],
+        loss_type=base_config["loss_type"],
+        bce_weight=base_config["bce_weight"],
+        dice_weight=base_config["dice_weight"],
+        iou_weight=base_config["iou_weight"],
+        tversky_weight=base_config["tversky_weight"],
+        tversky_alpha=base_config["tversky_alpha"],
+        tversky_beta=base_config["tversky_beta"],
+        loss_smooth=base_config["loss_smooth"],
         num_workers=base_config["num_workers"],
         max_epochs=base_config["max_epochs"],
         patience=base_config["patience"],
@@ -350,6 +361,20 @@ def main():
         "target_size": [384, 384],   # JSON-friendly
         "num_classes": 1,
         "learning_rate": 1e-4,
+        "optimizer_name": "AdamW",
+        "weight_decay": 1e-4,
+        # multi loss settings
+        # loss_type options: "bce", "bce_dice", "bce_dice_iou", "bce_tversky", "multi"
+        "loss_type": "bce_dice",
+        "bce_weight": 0.5,
+        "dice_weight": 0.5,
+        "iou_weight": 0.0,
+        "tversky_weight": 0.0,
+        "tversky_alpha": 0.5,
+        "tversky_beta": 0.5,
+        "loss_smooth": 1.0,
+        
+        
         "num_workers": 0,
         "max_epochs": 200,
         "patience": 8,
