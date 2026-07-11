@@ -3,7 +3,7 @@ import csv
 import json
 from datetime import datetime
 from typing import Dict, List, Any
-
+import time
 import numpy as np
 
 from dataset_sampling import (
@@ -99,7 +99,16 @@ def build_fraction_summary(
 
     if test_summary_csv is not None and os.path.exists(test_summary_csv):
         test_summary = read_test_summary_csv(test_summary_csv)
-        for metric in ["dice", "iou", "precision", "recall", "accuracy", "test_loss"]:
+        for metric in [
+            "dice",
+            "iou",
+            "precision",
+            "recall",
+            "accuracy",
+            "test_loss",
+            "normalized_surface_distance",
+            "normalized_surface_dice",
+        ]:
             if metric in test_summary:
                 summary[f"test_{metric}_mean"] = test_summary[metric]["mean"]
                 summary[f"test_{metric}_std"] = test_summary[metric]["std"]
@@ -206,7 +215,9 @@ def run_fraction_experiment(
     run_kfold_training(
         all_trainval_txt=subset_txt_path,
         test_txt=test_txt,
+        use_kfold=base_config["use_kfold"],
         n_splits=base_config["n_splits"],
+        val_ratio=base_config["val_ratio"],
         seed=base_config["seed"],
         batch_size=base_config["batch_size"],
         target_size=tuple(base_config["target_size"]),
@@ -328,19 +339,20 @@ def main():
     # subset_values = [0.25, 0.50, 0.75, 1.00]
 
     # mode = "count" 時，例如：
-    #subset_values = [438, 876, 1315, 1753, 3600]
-    subset_values = [3600]
+    subset_values = [438, 876, 1315, 1753, 3600]
 
     base_config = {
-        "n_splits": 5,
-        "seed": 902,
-        "batch_size": 2,
-        "target_size": [304, 304],   # JSON-friendly
+        "use_kfold": False,
+        "n_splits": 2, # more than 2
+        "val_ratio": 0.2,
+        "seed": int(time.time()),
+        "batch_size": 12,
+        "target_size": [384, 384],   # JSON-friendly
         "num_classes": 1,
         "learning_rate": 1e-4,
         "num_workers": 0,
         "max_epochs": 200,
-        "patience": 5,
+        "patience": 8,
         "min_delta": 1e-4,
         "binary_pos_weight": 3.0,
         "multiclass_weights": None,
@@ -349,19 +361,19 @@ def main():
         "ranking_metric": "dice",
         "crop_padding_for_train_loss": True,
         "loss_reduction_mode": "sample_mean",
-        "early_stop_monitor": "val_loss", # val_dice, val_loss, train_loss
-        "scheduler_monitor": "val_loss", # val_dice, val_loss, train_loss
+        "early_stop_monitor": "val_dice", # val_dice, val_loss, train_loss
+        "scheduler_monitor": "val_dice", # val_dice, val_loss, train_loss
 
         # augmentation + normalization
-        "augment_train": True,
         "normalize_mode": "fixed_05",
+        "augment_train": True,
         "aug_prob": 0.6,
         "hflip_prob": 0.5,
         "vflip_prob": 0.0,
         "rotation_degree": 10,
         "rotation_prob": 0.5,
-        "use_color_jitter": True,
-        "color_jitter_prob": 0.3,
+        "use_color_jitter": False,
+        "color_jitter_prob": 0,
         "brightness": 0.2,
         "contrast": 0.2,
         "saturation": 0.2,

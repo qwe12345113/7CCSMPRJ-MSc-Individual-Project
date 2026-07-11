@@ -18,7 +18,7 @@ import torch.nn as nn
 import torchvision
 import torchvision.transforms as T
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, train_test_split
 
 from dataloader import (
     read_samples_from_txt,
@@ -579,7 +579,12 @@ def run_single_fold(
         device=device
     )
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    # optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=learning_rate,
+        weight_decay=1e-4
+    )
 
     scheduler = ReduceLROnPlateau(
         optimizer,
@@ -738,7 +743,9 @@ def run_single_fold(
 def run_kfold_training(
         all_trainval_txt,
         test_txt=None,
+        use_kfold=True,
         n_splits=5,
+        val_ratio=0.2,
         seed=42,
         batch_size=8,
         target_size=(672, 928),
@@ -777,6 +784,9 @@ def run_kfold_training(
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    print(f"use_kfold = {use_kfold}")
+    print(f"n_splits = {n_splits}")
+    print(f"val_ratio = {val_ratio}")
     print(f"crop_padding_for_train_loss = {crop_padding_for_train_loss}")
     print(f"loss_reduction_mode = {loss_reduction_mode}")
     print(f"early_stop_monitor = {early_stop_monitor}")
@@ -800,16 +810,38 @@ def run_kfold_training(
             augment=False,
             normalize=normalize
         )
-
-    kf = KFold(n_splits=n_splits, shuffle=True, random_state=seed)
     fold_results = []
     all_fold_test_results = []
 
-    for fold_id, (train_idx, val_idx) in enumerate(kf.split(all_samples), start=1):
+    all_indices = np.arange(len(all_samples))
+    if use_kfold:
+        if n_splits < 2:
+            raise ValueError(f"When use_kfold=True, n_splits must be >= 2, got {n_splits}")
+        splitter = KFold(n_splits=n_splits, shuffle=True, random_state=seed)
+        split_list = list(splitter.split(all_samples))
+        total_runs = n_splits
+        print(f"Using K-Fold cross validation | n_splits = {n_splits}")
+    else:
+        if not (0.0 < val_ratio < 1.0):
+            raise ValueError(f"When use_kfold=False, val_ratio must be in (0,1), got {val_ratio}")
+        train_idx, val_idx = train_test_split(
+            all_indices,
+            test_size=val_ratio,
+            random_state=seed,
+            shuffle=True,
+        )
+        split_list = [(train_idx, val_idx)]
+        total_runs = 1
+        print(f"Using single train/val split | train={(1 - val_ratio):.0%} | val={val_ratio:.0%}")
+
+    for fold_id, (train_idx, val_idx) in enumerate(split_list, start=1):
         train_samples = [all_samples[i] for i in train_idx]
         val_samples = [all_samples[i] for i in val_idx]
 
-        print(f"\n===== Fold {fold_id}/{n_splits} =====")
+        if use_kfold:
+            print(f"\n===== Fold {fold_id}/{total_runs} =====")
+        else:
+            print(f"\n===== Single Split {fold_id}/{total_runs} =====")
         print(f"Train samples: {len(train_samples)} | Val samples: {len(val_samples)}")
 
         result = run_single_fold(
@@ -928,11 +960,16 @@ def run_kfold_training(
     mean_train_time_sec = np.mean([r["train_time_sec"] for r in fold_results])
     mean_train_time_min = np.mean([r["train_time_min"] for r in fold_results])
     mean_gpu_peak_memory_mb = np.mean([r["gpu_peak_memory_mb"] for r in fold_results])
-
-    print(f"\nK-Fold mean Val Dice: {mean_dice:.4f}")
-    print(f"K-Fold mean Val IoU : {mean_iou:.4f}")
-    print(f"K-Fold mean training time: {mean_train_time_sec:.2f} sec ({mean_train_time_min:.2f} min)")
-    print(f"K-Fold mean GPU peak memory: {mean_gpu_peak_memory_mb:.2f} MB")
+    if use_kfold:
+        print(f"\nK-Fold mean Val Dice: {mean_dice:.4f}")
+        print(f"K-Fold mean Val IoU : {mean_iou:.4f}")
+        print(f"K-Fold mean training time: {mean_train_time_sec:.2f} sec ({mean_train_time_min:.2f} min)")
+        print(f"K-Fold mean GPU peak memory: {mean_gpu_peak_memory_mb:.2f} MB")
+    else:
+        print(f"\nSingle-split Val Dice: {mean_dice:.4f}")
+        print(f"Single-split Val IoU : {mean_iou:.4f}")
+        print(f"Single-split training time: {mean_train_time_sec:.2f} sec ({mean_train_time_min:.2f} min)")
+        print(f"Single-split GPU peak memory: {mean_gpu_peak_memory_mb:.2f} MB")
 
     if all_fold_test_results:
         save_all_folds_test_results_csv(
@@ -954,120 +991,3 @@ def run_kfold_training(
         for metric in ["test_loss", "dice", "iou", "precision", "recall", "accuracy"]:
             values = [row[metric] for row in all_fold_test_results]
             print(f"{metric}: mean={np.mean(values):.4f}, std={np.std(values):.4f}")
-
-'''
-def main():
-    torch.backends.cudnn.benchmark = True
-
-    trainval_txt = "../dataset/train_val.txt"
-    test_txt = "../dataset/test.txt"
-
-    config = {
-        "trainval_txt": trainval_txt,
-        "test_txt": test_txt,
-        "n_splits": 5,
-        "seed": 42,
-        "batch_size": 4,
-        "target_size": (320, 320),
-        "num_classes": 1,
-        "learning_rate": 1e-4,
-        "num_workers": 0,
-        "max_epochs": 200,
-        "patience": 15,
-        "min_delta": 1e-4,
-        "binary_pos_weight": 3.0,
-        "multiclass_weights": None,
-        "base_save_root": "kfold_results",
-        "use_amp": True,
-        "n_case_samples": 5,
-        "ranking_metric": "dice",
-        "crop_padding_for_train_loss": True,
-        "loss_reduction_mode": "sample_mean",
-        "early_stop_monitor": "val_loss",
-        "scheduler_monitor": "val_loss",
-
-        "augment_train": True,
-        "normalize_mode": "fixed_05",
-        "aug_prob": 0.5,
-        "hflip_prob": 0.5,
-        "vflip_prob": 0.0,
-        "rotation_degree": 10,
-        "rotation_prob": 0.5,
-        "use_color_jitter": True,
-        "color_jitter_prob": 0.3,
-        "brightness": 0.2,
-        "contrast": 0.2,
-        "saturation": 0.2,
-        "hue": 0.02,
-    }
-
-    temp_model = UNet(in_channels=3, num_classes=config["num_classes"])
-    model_summary_text, total_params, trainable_params = get_model_summary_text(temp_model)
-
-    config["model_name"] = "UNet"
-    config["model_summary"] = model_summary_text
-    config["total_parameters"] = total_params
-    config["trainable_parameters"] = trainable_params
-
-    save_root = build_timestamped_save_root(config["base_save_root"])
-    print(f"Results will be saved to: {save_root}")
-    os.makedirs(save_root, exist_ok=True)
-
-    save_json(config, os.path.join(save_root, "config.json"))
-    save_environment_info(os.path.join(save_root, "environment.txt"))
-    save_experiment_notes(
-        os.path.join(save_root, "experiment_notes.txt"),
-        notes="""
-Experiment notes:
-- Binary segmentation with U-Net
-- Variable image sizes are resized with aspect ratio preserved, then padded to fixed target_size
-- Validation/Test metrics are computed after removing padding
-- Training loss supports sample_mean and pixel_weighted
-- Early stopping and LR scheduler monitors are configurable
-- Training augmentation is enabled probabilistically via aug_prob
-        """
-    )
-
-    run_kfold_training(
-        all_trainval_txt=config["trainval_txt"],
-        test_txt=config["test_txt"],
-        n_splits=config["n_splits"],
-        seed=config["seed"],
-        batch_size=config["batch_size"],
-        target_size=config["target_size"],
-        num_classes=config["num_classes"],
-        learning_rate=config["learning_rate"],
-        num_workers=config["num_workers"],
-        max_epochs=config["max_epochs"],
-        patience=config["patience"],
-        min_delta=config["min_delta"],
-        binary_pos_weight=config["binary_pos_weight"],
-        multiclass_weights=config["multiclass_weights"],
-        save_root=save_root,
-        use_amp=config["use_amp"],
-        n_case_samples=config["n_case_samples"],
-        ranking_metric=config["ranking_metric"],
-        crop_padding_for_train_loss=config["crop_padding_for_train_loss"],
-        loss_reduction_mode=config["loss_reduction_mode"],
-        early_stop_monitor=config["early_stop_monitor"],
-        scheduler_monitor=config["scheduler_monitor"],
-        augment_train=config["augment_train"],
-        normalize_mode=config["normalize_mode"],
-        aug_prob=config["aug_prob"],
-        hflip_prob=config["hflip_prob"],
-        vflip_prob=config["vflip_prob"],
-        rotation_degree=config["rotation_degree"],
-        rotation_prob=config["rotation_prob"],
-        use_color_jitter=config["use_color_jitter"],
-        color_jitter_prob=config["color_jitter_prob"],
-        brightness=config["brightness"],
-        contrast=config["contrast"],
-        saturation=config["saturation"],
-        hue=config["hue"]
-    )
-
-
-if __name__ == "__main__":
-    main()
-
-'''
