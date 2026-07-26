@@ -369,7 +369,9 @@ def get_segmentation_dataloader_from_txt(
         hue=hue
     )
 
-
+'''
+function test
+'''
 if __name__ == "__main__":
     txt_file = "../dataset/train.txt"
 

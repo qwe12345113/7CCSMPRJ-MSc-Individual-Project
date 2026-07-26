@@ -76,6 +76,9 @@ def fraction_to_tag(fraction: float) -> str:
     return str(int(round(fraction * 100)))
 
 
+'''
+function test
+'''
 if __name__ == "__main__":
     trainval_txt = "../dataset/train_val.txt"
     samples = load_trainval_samples(trainval_txt)

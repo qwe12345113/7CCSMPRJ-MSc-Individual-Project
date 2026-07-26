@@ -350,13 +350,14 @@ def main():
     # subset_values = [0.25, 0.50, 0.75, 1.00]
 
     # mode = "count" 時，例如：
-    subset_values = [438, 876, 1315, 1753, 3600]
+    # subset_values = [438, 876, 1315, 1753, 3600]
+    subset_values = [3600]
 
     base_config = {
-        "use_kfold": False,
-        "n_splits": 2, # more than 2
+        "use_kfold": True,
+        "n_splits": 5, # more than 2
         "val_ratio": 0.2,
-        "seed": int(time.time()),
+        "seed": 1784472838, #int(time.time()),
         "batch_size": 12,
         "target_size": [384, 384],   # JSON-friendly
         "num_classes": 1,
@@ -365,13 +366,13 @@ def main():
         "weight_decay": 1e-4,
         # multi loss settings
         # loss_type options: "bce", "bce_dice", "bce_dice_iou", "bce_tversky", "multi"
-        "loss_type": "bce_dice",
-        "bce_weight": 0.5,
-        "dice_weight": 0.5,
-        "iou_weight": 0.0,
+        "loss_type": "bce_dice_iou",
+        "bce_weight": 0.45,
+        "dice_weight": 0.45,
+        "iou_weight": 0.1,
         "tversky_weight": 0.0,
-        "tversky_alpha": 0.5,
-        "tversky_beta": 0.5,
+        "tversky_alpha": 0.4,
+        "tversky_beta": 0.6,
         "loss_smooth": 1.0,
         
         
@@ -392,7 +393,7 @@ def main():
         # augmentation + normalization
         "normalize_mode": "fixed_05",
         "augment_train": True,
-        "aug_prob": 0.6,
+        "aug_prob": 0.7,
         "hflip_prob": 0.5,
         "vflip_prob": 0.0,
         "rotation_degree": 10,

@@ -5,3 +5,7 @@ notebook/
 *.zip
 kfold_results*/
 *.pyc
+combined_training_results5.py
+combined_training_results.py
+generate_segmentation_maps.py
+print_numeric_result.py
